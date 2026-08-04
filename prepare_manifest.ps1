@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 $ErrorActionPreference = 'Stop'
 $sourceDir = Join-Path $PSScriptRoot 'translation_patch.b64.parts'
 $partsDir = Join-Path $PSScriptRoot 'translation_patch.parts'
