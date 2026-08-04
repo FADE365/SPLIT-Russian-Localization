@@ -1,0 +1,6 @@
+work/
+*.split_ru_backup
+*.tmp
+*.log
+Godot_v*.exe
+GDRE_tools.exe
