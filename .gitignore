@@ -1,5 +1,7 @@
 work/
+translation_patch.parts/
 *.split_ru_backup
+*.split_ru_installing
 *.tmp
 *.log
 Godot_v*.exe
