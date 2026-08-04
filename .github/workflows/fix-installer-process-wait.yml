@@ -1,0 +1,147 @@
+name: Fix installer process waiting
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fix-installer-process-wait.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-installer:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch install_ru.ps1
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path("install_ru.ps1")
+          text = path.read_text(encoding="utf-8-sig")
+
+          invoke_block = r'''function ConvertTo-NativeArgument([string]$Argument) {
+              if ($null -eq $Argument) { return '""' }
+              if ($Argument -notmatch '[\s"]') { return $Argument }
+              return '"' + $Argument.Replace('"', '\"') + '"'
+          }
+
+          function Invoke-Checked([string]$Exe, [string[]]$Arguments, [string]$Stage) {
+              Write-Host ('  ' + $Stage + '...')
+              $argumentLine = (($Arguments | ForEach-Object { ConvertTo-NativeArgument ([string]$_) }) -join ' ')
+              $process = Start-Process -FilePath $Exe -ArgumentList $argumentLine -NoNewWindow -Wait -PassThru
+              if ($null -eq $process) {
+                  throw "${Stage}: не удалось получить состояние процесса."
+              }
+              $exitCode = $process.ExitCode
+              if ($exitCode -ne 0) {
+                  throw "$Stage завершён с кодом $exitCode."
+              }
+          }
+          '''
+
+          text, count = re.subn(
+              r"function Invoke-Checked\(\[string\]\$Exe, \[string\[\]\]\$Arguments, \[string\]\$Stage\) \{.*?\n\}\n(?=\nfunction Get-GdreTools)",
+              invoke_block.rstrip(),
+              text,
+              count=1,
+              flags=re.S,
+          )
+          if count != 1:
+              raise SystemExit("Invoke-Checked block was not found")
+
+          text = text.replace(
+              "$workRoot = $null\n$tempExe = $null\n",
+              "$workRoot = $null\n$tempExe = $null\n$backupPath = $null\n",
+              1,
+          )
+          text = text.replace(
+              "Write-Host 'Версия установщика: 1.0-test'",
+              "Write-Host 'Версия установщика: 1.0-test.2'",
+              1,
+          )
+
+          old_target = r'''    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+              throw "Резервная копия уже существует:`n$backupPath`nРусификатор, вероятно, уже установлен."
+          }
+
+          Write-Host ('Игра: ' + $exePath)
+          Write-Host 'Проверка версии Steam EXE...'
+          $actualHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
+          if ($actualHash -ne $ExpectedExeSha256) {
+              throw "Эта версия split.exe пока не поддерживается.`nОжидалось: $ExpectedExeSha256`nПолучено:  $actualHash"
+          }
+
+          $gdre = Get-GdreTools'''
+
+          new_target = r'''    Write-Host ('Игра: ' + $exePath)
+          Write-Host 'Проверка версии Steam EXE...'
+          $actualHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
+          if ($actualHash -ne $ExpectedExeSha256) {
+              if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+                  $backupHash = (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash
+                  if ($backupHash -eq $ExpectedExeSha256) {
+                      throw "Текущий split.exe отличается от оригинала, а корректная резервная копия уже существует.`nРусификатор, вероятно, уже установлен. Для переустановки сначала запустите uninstall_ru.bat."
+                  }
+              }
+              throw "Эта версия split.exe пока не поддерживается.`nОжидалось: $ExpectedExeSha256`nПолучено:  $actualHash"
+          }
+
+          $reuseBackup = $false
+          if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+              $backupHash = (Get-FileHash -LiteralPath $backupPath -Algorithm SHA256).Hash
+              if ($backupHash -ne $ExpectedExeSha256) {
+                  throw "Найдена повреждённая или несовместимая резервная копия:`n$backupPath`nУдалите её вручную только после проверки, что текущий split.exe запускается."
+              }
+              $reuseBackup = $true
+              Write-Host 'Найдена резервная копия от предыдущей неудачной попытки. Она будет использована повторно.'
+          }
+
+          $gdre = Get-GdreTools'''
+
+          if old_target not in text:
+              raise SystemExit("Backup/version block was not found")
+          text = text.replace(old_target, new_target, 1)
+
+          old_copy = r'''    Write-Host 'Создание резервной копии оригинального EXE...'
+          Copy-Item -LiteralPath $exePath -Destination $backupPath -Force'''
+          new_copy = r'''    if (-not $reuseBackup) {
+              Write-Host 'Создание резервной копии оригинального EXE...'
+              Copy-Item -LiteralPath $exePath -Destination $backupPath -Force
+          } else {
+              Write-Host 'Использование существующей резервной копии оригинального EXE...'
+          }'''
+          if old_copy not in text:
+              raise SystemExit("Backup copy block was not found")
+          text = text.replace(old_copy, new_copy, 1)
+
+          text = text.replace(
+              "    Wait-Exit 'Установка не завершена. Оригинальная игра сохранена в резервной копии.'",
+              "    $failureMessage = 'Установка не завершена.'\n"
+              "    if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {\n"
+              "        $failureMessage += ' Оригинальная игра сохранена в резервной копии.'\n"
+              "    }\n"
+              "    Wait-Exit $failureMessage",
+              1,
+          )
+
+          path.write_text(text, encoding="utf-8-sig", newline="\n")
+
+      - name: Commit installer fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add install_ru.ps1
+          if ! git diff --cached --quiet; then
+            git commit -m "Wait for GDRETools and reuse failed-install backup"
+            git push
+          fi
