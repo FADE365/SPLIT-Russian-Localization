@@ -1,0 +1,50 @@
+name: Fix PowerShell UTF-8 encoding
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "*.ps1"
+      - ".github/workflows/fix-powershell-encoding.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  add-bom:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add UTF-8 BOM for Windows PowerShell 5.1
+        shell: python
+        run: |
+          from pathlib import Path
+
+          for filename in (
+              "install_ru.ps1",
+              "uninstall_ru.ps1",
+              "prepare_manifest.ps1",
+          ):
+              path = Path(filename)
+              if not path.is_file():
+                  continue
+              data = path.read_bytes()
+              if not data.startswith(b"\xef\xbb\xbf"):
+                  path.write_bytes(b"\xef\xbb\xbf" + data)
+                  print(f"Added BOM: {filename}")
+
+      - name: Commit encoding fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add install_ru.ps1 uninstall_ru.ps1 prepare_manifest.ps1
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix PowerShell 5.1 UTF-8 encoding"
+            git push
+          fi
